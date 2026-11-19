@@ -27,6 +27,51 @@ enum MicSettings {
         UserDefaults.standard.object(forKey: Keys.gate) as? Bool ?? true
     }
 
+    /// 音声設定で選んだマイクで録音できるようにする。
+    /// 標準は iPad 本体のマイク（AirPods などは聞く専用：AirPods のマイクを使うと通話モードになり音質が下がるため）。
+    /// 選んだマイクがつながっていなければ本体のマイクに戻し、その旨のメッセージを返す。
+    static func configureSessionForRecording() throws -> String? {
+        let session = AVAudioSession.sharedInstance()
+        let selection = MicSettings.selectedInput
+        var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+        if selection == MicSettings.bluetoothID {
+            options.insert(.allowBluetooth)
+        }
+        try session.setCategory(.playAndRecord, mode: .default, options: options)
+        try session.setActive(true)
+
+        let inputs = session.availableInputs ?? []
+        let builtIn = inputs.first { $0.portType == .builtInMic }
+        var preferred: AVAudioSessionPortDescription?
+        var warning: String?
+        switch selection {
+        case MicSettings.builtInID:
+            preferred = builtIn
+        case MicSettings.bluetoothID:
+            preferred = inputs.first { $0.portType == .bluetoothHFP }
+            if preferred == nil {
+                preferred = builtIn
+                warning = "Bluetooth のマイクが見つからないため、iPad 本体のマイクで録音します。"
+            }
+        default:
+            preferred = inputs.first { $0.uid == selection }
+            if preferred == nil {
+                preferred = builtIn
+                warning = "選んだマイクがつながっていないため、iPad 本体のマイクで録音します。"
+            }
+        }
+        if let preferred {
+            try? session.setPreferredInput(preferred)
+        }
+        return warning
+    }
+
+    static func restorePlaybackSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .moviePlayback)
+        try? session.setActive(true)
+    }
+
     static func kindName(_ type: AVAudioSession.Port) -> String {
         switch type {
         case .builtInMic: return "iPad 本体"

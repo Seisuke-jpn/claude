@@ -132,36 +132,35 @@ enum NarrationMixer {
             }
         }
 
-        // 2) マイクの声：録音開始時刻に合わせて置く
-        if let mic {
-            let micAsset = AVURLAsset(url: mic.url)
-            if let micTrack = try await micAsset.loadTracks(withMediaType: .audio).first,
-               let track = audioComposition.addMutableTrack(withMediaType: .audio,
-                                                            preferredTrackID: kCMPersistentTrackID_Invalid) {
-                let micDuration = try await micAsset.load(.duration).seconds
-                let offset = mic.startHostSeconds - wallOrigin
-                let sourceStart = offset < 0 ? -offset : 0
-                let at = max(0, offset)
-                let length = min(micDuration - sourceStart, total - at)
-                if length > 0.05 {
-                    if at > 0.001 {
-                        track.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: t(at)))
-                    }
-                    try track.insertTimeRange(CMTimeRange(start: t(sourceStart), duration: t(length)),
-                                              of: micTrack, at: t(at))
-                    let parameters = AVMutableAudioMixInputParameters(track: track)
-                    if settings.micGate, !speech.isEmpty {
-                        applyEnvelope(parameters, outside: settings.micVolume * 0.15,
-                                      inside: settings.micVolume, speech: speech)
-                    } else {
-                        parameters.setVolume(settings.micVolume, at: .zero)
-                    }
-                    mixParameters.append(parameters)
-                    report.micSeconds = length
-                } else {
-                    audioComposition.removeTrack(track)
-                }
+        // 2) マイクの声：録音開始時刻に合わせて置く（音声経路が変わった場合は区間ごとに置く）
+        for segment in mic?.segments ?? [] {
+            let micAsset = AVURLAsset(url: segment.url)
+            guard let micTrack = try await micAsset.loadTracks(withMediaType: .audio).first,
+                  let track = audioComposition.addMutableTrack(withMediaType: .audio,
+                                                               preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
+            let micDuration = try await micAsset.load(.duration).seconds
+            let offset = segment.startHostSeconds - wallOrigin
+            let sourceStart = offset < 0 ? -offset : 0
+            let at = max(0, offset)
+            let length = min(micDuration - sourceStart, total - at)
+            guard length > 0.05 else {
+                audioComposition.removeTrack(track)
+                continue
             }
+            if at > 0.001 {
+                track.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: t(at)))
+            }
+            try track.insertTimeRange(CMTimeRange(start: t(sourceStart), duration: t(length)),
+                                      of: micTrack, at: t(at))
+            let parameters = AVMutableAudioMixInputParameters(track: track)
+            if settings.micGate, !speech.isEmpty {
+                applyEnvelope(parameters, outside: settings.micVolume * 0.15,
+                              inside: settings.micVolume, speech: speech)
+            } else {
+                parameters.setVolume(settings.micVolume, at: .zero)
+            }
+            mixParameters.append(parameters)
+            report.micSeconds += length
         }
 
         // 音が何もなければ映像だけ保存

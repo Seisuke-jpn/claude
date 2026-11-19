@@ -61,8 +61,8 @@ final class SessionRecorder: NSObject, ObservableObject {
 
         if micGranted {
             do {
-                let routeWarning = try configureAudioSessionForRecording()
-                let recorder = MicRecorder(url: temp.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf"))
+                let routeWarning = try MicSettings.configureSessionForRecording()
+                let recorder = MicRecorder(directory: temp.appendingPathComponent("Mic-\(UUID().uuidString)", isDirectory: true))
                 try recorder.start(noiseReduction: MicSettings.noiseReduction)
                 mic = recorder
                 voiceProcessingActive = recorder.voiceProcessingActive
@@ -117,14 +117,14 @@ final class SessionRecorder: NSObject, ObservableObject {
         self.writer = nil
         isRecording = false
         UIApplication.shared.isIdleTimerDisabled = false
-        restoreAudioSession()
+        MicSettings.restorePlaybackSession()
 
         let videoOnly: URL
         switch videoResult {
         case .success(let url):
             videoOnly = url
         case .failure(let error):
-            if let micResult { try? FileManager.default.removeItem(at: micResult.url) }
+            micResult?.removeFiles()
             errorMessage = "録画を保存できませんでした：\(error.localizedDescription)"
             return nil
         }
@@ -156,7 +156,7 @@ final class SessionRecorder: NSObject, ObservableObject {
             try? FileManager.default.moveItem(at: videoOnly, to: finalURL)
             errorMessage = "音声を重ねられなかったため、映像のみ保存しました：\(error.localizedDescription)"
         }
-        if let micResult { try? FileManager.default.removeItem(at: micResult.url) }
+        micResult?.removeFiles()
         return FileManager.default.fileExists(atPath: finalURL.path) ? finalURL : nil
     }
 
@@ -191,57 +191,21 @@ final class SessionRecorder: NSObject, ObservableObject {
         tickCount += 1
         if tickCount % 3 == 0, let mic {
             micLevel = mic.currentLevel
+            if voiceProcessingActive, !mic.voiceProcessingActive {
+                voiceProcessingActive = false
+                if mic.fellBackFromVoiceProcessing {
+                    errorMessage = "ノイズ除去を使うとマイクの音が届かなかったため、ノイズ除去なしで録音を続けています。"
+                }
+            }
+            if tickCount % 30 == 0 {
+                inputName = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName
+            }
         }
         let seconds = Int(CACurrentMediaTime() - startedAt)
         if seconds != elapsed { elapsed = seconds }
     }
 
     // MARK: - オーディオ設定
-
-    /// 音声設定で選んだマイクで録音できるようにする。
-    /// 標準は iPad 本体のマイク（AirPods などは聞く専用：AirPods のマイクを使うと通話モードになり音質が下がるため）。
-    /// 選んだマイクがつながっていなければ本体のマイクに戻し、その旨のメッセージを返す。
-    private func configureAudioSessionForRecording() throws -> String? {
-        let session = AVAudioSession.sharedInstance()
-        let selection = MicSettings.selectedInput
-        var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
-        if selection == MicSettings.bluetoothID {
-            options.insert(.allowBluetooth)
-        }
-        try session.setCategory(.playAndRecord, mode: .default, options: options)
-        try session.setActive(true)
-
-        let inputs = session.availableInputs ?? []
-        let builtIn = inputs.first { $0.portType == .builtInMic }
-        var preferred: AVAudioSessionPortDescription?
-        var warning: String?
-        switch selection {
-        case MicSettings.builtInID:
-            preferred = builtIn
-        case MicSettings.bluetoothID:
-            preferred = inputs.first { $0.portType == .bluetoothHFP }
-            if preferred == nil {
-                preferred = builtIn
-                warning = "Bluetooth のマイクが見つからないため、iPad 本体のマイクで録音します。"
-            }
-        default:
-            preferred = inputs.first { $0.uid == selection }
-            if preferred == nil {
-                preferred = builtIn
-                warning = "選んだマイクがつながっていないため、iPad 本体のマイクで録音します。"
-            }
-        }
-        if let preferred {
-            try? session.setPreferredInput(preferred)
-        }
-        return warning
-    }
-
-    private func restoreAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .moviePlayback)
-        try? session.setActive(true)
-    }
 
     /// 長い辺 1920 / 短い辺 1080 に収まるサイズ（偶数）にする
     static func outputSize(for source: CGSize) -> CGSize {

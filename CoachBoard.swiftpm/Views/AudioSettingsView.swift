@@ -12,6 +12,7 @@ struct AudioSettingsView: View {
     @AppStorage(MicSettings.Keys.gate) private var micGate = true
 
     @StateObject private var catalog = MicInputCatalog()
+    @StateObject private var tester = MicTester()
 
     private var routeChanges: AnyPublisher<Notification, Never> {
         NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
@@ -60,6 +61,36 @@ struct AudioSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // マイクのテスト（録画せずに音が届くか確認）
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 12) {
+                        Button {
+                            if tester.isTesting {
+                                tester.stop()
+                            } else {
+                                Task { await tester.start() }
+                            }
+                        } label: {
+                            Label(tester.isTesting ? "テストを止める" : "マイクをテスト",
+                                  systemImage: tester.isTesting ? "stop.circle" : "mic.badge.plus")
+                        }
+                        .buttonStyle(.bordered)
+                        if tester.isTesting {
+                            MicLevelMeter(level: tester.level)
+                        }
+                    }
+                    if !tester.status.isEmpty {
+                        Text(tester.status)
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if tester.isTesting, let name = tester.inputName {
+                        Text("使用中のマイク：\(name)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Toggle(isOn: $noiseReduction) {
@@ -116,6 +147,9 @@ struct AudioSettingsView: View {
         }
         .frame(width: 380, height: 560)
         .onAppear { catalog.refresh() }
+        .onDisappear { tester.stop() }
+        .onChange(of: micInput) { _, _ in tester.restartIfTesting() }
+        .onChange(of: noiseReduction) { _, _ in tester.restartIfTesting() }
         .onReceive(routeChanges) { _ in catalog.refresh() }
     }
 }

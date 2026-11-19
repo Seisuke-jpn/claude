@@ -1,74 +1,92 @@
 import SwiftUI
 import UIKit
+import PencilKit
 
-/// Apple Pencil の入力を受け取って線を描くビュー
-final class InkCanvasView: UIView, UIGestureRecognizerDelegate {
+/// 画面上の手描き。描画そのものは PencilKit（メモアプリと同じエンジン）に任せる。
+/// 書き始め・書き終わりの補正や Pencil の遅延対策は PencilKit 側で行われる。
+final class InkBoardView: UIView, PKCanvasViewDelegate, UIGestureRecognizerDelegate {
     private let model: InkModel
-    private let rasterizer = InkRasterizer()
-    private let strokeRecognizer = StrokeGestureRecognizer(target: nil, action: nil)
-
-    var allowFinger: Bool {
-        get { strokeRecognizer.allowFinger }
-        set { strokeRecognizer.allowFinger = newValue }
-    }
+    private let canvas = PKCanvasView()
+    /// 録画用に「描いている途中の線」を追いかけるだけの認識（描画はしない）
+    private let liveRecognizer = StrokeGestureRecognizer(target: nil, action: nil)
+    private var isApplying = false
 
     init(model: InkModel) {
         self.model = model
         super.init(frame: .zero)
-        isOpaque = false
         backgroundColor = .clear
-        contentMode = .redraw
-        isMultipleTouchEnabled = true
-        model.onChange = { [weak self] in self?.setNeedsDisplay() }
+        isOpaque = false
 
-        strokeRecognizer.delegate = self
-        strokeRecognizer.onBegin = { [weak self] point in
+        canvas.backgroundColor = .clear
+        canvas.isOpaque = false
+        canvas.isScrollEnabled = false
+        canvas.showsVerticalScrollIndicator = false
+        canvas.showsHorizontalScrollIndicator = false
+        canvas.minimumZoomScale = 1
+        canvas.maximumZoomScale = 1
+        canvas.contentInsetAdjustmentBehavior = .never
+        // アプリはダークモードなので、色が反転しないよう描画面だけライト扱いにする
+        canvas.overrideUserInterfaceStyle = .light
+        canvas.drawingPolicy = .pencilOnly
+        canvas.delegate = self
+        canvas.drawing = model.drawing
+        addSubview(canvas)
+
+        liveRecognizer.delegate = self
+        liveRecognizer.onBegin = { [weak self] point in self?.model.liveBegin(at: point) }
+        liveRecognizer.onAppend = { [weak self] point in self?.model.liveAppend(point) }
+        liveRecognizer.onEnd = { [weak self] in self?.model.liveEnd() }
+        canvas.addGestureRecognizer(liveRecognizer)
+
+        model.applyDrawing = { [weak self] drawing in
             guard let self else { return }
-            self.model.begin(at: self.normalized(point))
+            self.isApplying = true
+            self.canvas.drawing = drawing
+            self.isApplying = false
         }
-        strokeRecognizer.onAppend = { [weak self] point in
-            guard let self else { return }
-            self.model.append(self.normalized(point))
-        }
-        strokeRecognizer.onEnd = { [weak self] in
-            self?.model.end()
-        }
-        addGestureRecognizer(strokeRecognizer)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
 
-    private func normalized(_ p: CGPoint) -> CGPoint {
-        guard bounds.width > 0, bounds.height > 0 else { return .zero }
-        return CGPoint(x: p.x / bounds.width, y: p.y / bounds.height)
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        canvas.frame = bounds
+        model.updateCanvasSize(bounds.size)
+        canvas.tool = model.currentTool
     }
 
-    // 他のジェスチャーに線の入力を横取りされないようにする
+    func configure(allowFinger: Bool) {
+        canvas.drawingPolicy = allowFinger ? .anyInput : .pencilOnly
+        liveRecognizer.allowFinger = allowFinger
+        canvas.tool = model.currentTool
+    }
+
+    func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        guard !isApplying else { return }
+        model.canvasDidChange(canvasView.drawing)
+    }
+
+    // PencilKit の描画と同時に、録画用の追跡も動かす
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         true
-    }
-
-    override func draw(_ rect: CGRect) {
-        guard let ctx = UIGraphicsGetCurrentContext() else { return }
-        rasterizer.committed(for: model, size: bounds.size)?.draw(in: bounds)
-        if let current = model.current {
-            InkDrawing.draw(current, in: ctx, size: bounds.size)
-        }
     }
 }
 
 struct InkCanvas: UIViewRepresentable {
     let model: InkModel
     let allowFinger: Bool
+    // 色・太さが変わったときに updateUIView を呼ばせるために受け取る
+    let colorIndex: Int
+    let widthLevel: Int
 
-    func makeUIView(context: Context) -> InkCanvasView {
-        InkCanvasView(model: model)
+    func makeUIView(context: Context) -> InkBoardView {
+        InkBoardView(model: model)
     }
 
-    func updateUIView(_ view: InkCanvasView, context: Context) {
-        view.allowFinger = allowFinger
+    func updateUIView(_ view: InkBoardView, context: Context) {
+        view.configure(allowFinger: allowFinger)
     }
 }

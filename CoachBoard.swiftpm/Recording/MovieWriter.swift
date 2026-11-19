@@ -14,9 +14,9 @@ enum RecorderError: LocalizedError {
     }
 }
 
-/// 合成したフレームとマイク音声を mp4 に書き込む。
+/// 合成したフレームを mp4（映像のみ）に書き込む。音は録画停止後に NarrationMixer で重ねる。
 /// すべての処理は `queue` 上で行う（メインスレッドを止めないため）。
-final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
+final class MovieWriter: @unchecked Sendable {
     let queue = DispatchQueue(label: "CoachBoard.MovieWriter", qos: .userInitiated)
     let url: URL
     let size: CGSize
@@ -24,7 +24,6 @@ final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let adaptor: AVAssetWriterInputPixelBufferAdaptor
-    private let audioInput: AVAssetWriterInput?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private let background = CIColor(red: 0.12, green: 0.12, blue: 0.13)
@@ -35,7 +34,7 @@ final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
     private var startTime: CMTime = .zero
     private var lastVideoTime: CMTime?
 
-    init(url: URL, size: CGSize, includeAudio: Bool) throws {
+    init(url: URL, size: CGSize) throws {
         self.url = url
         self.size = size
         try? FileManager.default.removeItem(at: url)
@@ -62,24 +61,6 @@ final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         guard writer.canAdd(videoInput) else { throw RecorderError.setupFailed }
         writer.add(videoInput)
 
-        if includeAudio {
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVNumberOfChannelsKey: 1,
-                AVSampleRateKey: 48_000,
-                AVEncoderBitRateKey: 128_000
-            ])
-            input.expectsMediaDataInRealTime = true
-            if writer.canAdd(input) {
-                writer.add(input)
-                audioInput = input
-            } else {
-                audioInput = nil
-            }
-        } else {
-            audioInput = nil
-        }
-        super.init()
     }
 
     func start() throws {
@@ -128,15 +109,6 @@ final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         }
     }
 
-    // マイク音声（queue 上で呼ばれる）
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard !finished, sessionStarted, writer.status == .writing,
-              let audioInput, audioInput.isReadyForMoreMediaData else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts >= startTime else { return }
-        audioInput.append(sampleBuffer)
-    }
-
     func finish() async -> Result<URL, Error> {
         await withCheckedContinuation { continuation in
             queue.async {
@@ -148,7 +120,6 @@ final class MovieWriter: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
                     return
                 }
                 self.videoInput.markAsFinished()
-                self.audioInput?.markAsFinished()
                 self.writer.finishWriting {
                     if self.writer.status == .completed {
                         continuation.resume(returning: .success(self.url))

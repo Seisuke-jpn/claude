@@ -3,68 +3,86 @@ import CoreImage
 import QuartzCore
 import UIKit
 
-/// 「動画の今のフレーム（停止中は止めたフレーム）＋手描きの線」を 30fps で合成し続けて録画する。
-/// 動画を止めても録画は止まらない。
+/// 録画の司令塔。
+/// - 映像：「動画の今のフレーム（停止中は止めたフレーム）＋手描きの線」を 30fps で合成し続ける
+/// - 声：マイクを別ファイルに録音
+/// - 動画の音：「いつ・動画のどこを・何倍速で流していたか」を記録しておき、
+///   録画停止後に動画ファイルから音を取り出して同じタイミングに並べ、声と重ねて書き出す
 @MainActor
 final class SessionRecorder: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isBusy = false
+    @Published private(set) var isProcessing = false
     /// 録画経過秒（1秒単位で更新）
     @Published private(set) var elapsed: Int = 0
+    /// マイクの音量（0〜1）。録画中のメーター用。
+    @Published private(set) var micLevel: Float = 0
     @Published var errorMessage: String?
 
     private var writer: MovieWriter?
-    private var captureSession: AVCaptureSession?
+    private var mic: MicRecorder?
     private var displayLink: CADisplayLink?
     private var startedAt: CFTimeInterval = 0
+    private var tickCount = 0
 
     private weak var player: PlayerController?
     private weak var ink: InkModel?
-    private let rasterizer = InkRasterizer(scale: 1)
+    private let rasterizer = InkRasterizer()
     private var lastInkVersion = -1
     private var inkImage: CIImage?
+
+    private var wallOrigin: Double?
+    private var samples: [PlaybackSample] = []
+    private var sourceURL: URL?
+    private var finalURL: URL?
 
     func start(player: PlayerController, ink: InkModel, url: URL) async {
         guard !isRecording, !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
 
-        let micGranted = await AVCaptureDevice.requestAccess(for: .audio)
+        let micGranted = await AVAudioApplication.requestRecordPermission()
         let size = Self.outputSize(for: player.presentationSize)
+        let temp = FileManager.default.temporaryDirectory
 
         let newWriter: MovieWriter
         do {
-            if micGranted { try configureAudioSessionForRecording() }
-            newWriter = try MovieWriter(url: url, size: size, includeAudio: micGranted)
+            newWriter = try MovieWriter(url: temp.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4"),
+                                        size: size)
             try newWriter.start()
         } catch {
-            restoreAudioSession()
             errorMessage = "録画を開始できませんでした：\(error.localizedDescription)"
             return
         }
 
         if micGranted {
-            let session = makeCaptureSession(delegate: newWriter)
-            captureSession = session
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    session.startRunning()
-                    continuation.resume()
-                }
+            do {
+                try configureAudioSessionForRecording()
+                let recorder = MicRecorder(url: temp.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf"))
+                try recorder.start()
+                mic = recorder
+            } catch {
+                errorMessage = "マイクを開始できなかったため、声なしで録画します：\(error.localizedDescription)"
             }
         } else {
-            errorMessage = "マイクが許可されていないため、音声なしで録画します。（設定アプリ → CoachBoard → マイク で許可できます）"
+            errorMessage = "マイクが許可されていないため、声なしで録画します。（設定アプリ → CoachBoard → マイク で許可できます）"
         }
 
         self.player = player
         self.ink = ink
         writer = newWriter
+        finalURL = url
+        sourceURL = player.hasVideo ? player.sourceURL : nil
+        samples = []
+        samples.reserveCapacity(30 * 60 * 10)
+        wallOrigin = nil
         lastInkVersion = -1
         inkImage = nil
         player.refreshCurrentFrame()
 
         startedAt = CACurrentMediaTime()
         elapsed = 0
+        tickCount = 0
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 30, preferred: 30)
         link.add(to: .main, forMode: .common)
@@ -74,51 +92,73 @@ final class SessionRecorder: NSObject, ObservableObject {
         isRecording = true
     }
 
-    /// 録画を止めてファイルを確定する。成功したら保存先 URL を返す。
+    /// 録画を止めて、映像・動画の音・声を重ねた mp4 を作る。成功したら保存先 URL を返す。
     func stop() async -> URL? {
-        guard isRecording, let writer else { return nil }
+        guard isRecording, let writer, let finalURL else { return nil }
         isBusy = true
         defer { isBusy = false }
 
         displayLink?.invalidate()
         displayLink = nil
+        let micResult = mic?.stop()
+        mic = nil
+        micLevel = 0
 
-        if let session = captureSession {
-            captureSession = nil
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    session.stopRunning()
-                    continuation.resume()
-                }
-            }
-        }
-
-        let result = await writer.finish()
+        let videoResult = await writer.finish()
         self.writer = nil
         isRecording = false
         UIApplication.shared.isIdleTimerDisabled = false
         restoreAudioSession()
 
-        switch result {
+        let videoOnly: URL
+        switch videoResult {
         case .success(let url):
-            return url
+            videoOnly = url
         case .failure(let error):
+            if let micResult { try? FileManager.default.removeItem(at: micResult.url) }
             errorMessage = "録画を保存できませんでした：\(error.localizedDescription)"
             return nil
         }
+
+        isProcessing = true
+        defer { isProcessing = false }
+        let segments = PlaybackTimeline.segments(from: samples)
+        samples = []
+        do {
+            try await NarrationMixer.makeFinalMovie(videoOnly: videoOnly,
+                                                    source: sourceURL,
+                                                    segments: segments,
+                                                    mic: micResult,
+                                                    wallOrigin: wallOrigin ?? 0,
+                                                    settings: NarrationMixSettings.current,
+                                                    output: finalURL)
+        } catch {
+            // 音の合成に失敗しても映像だけは残す
+            try? FileManager.default.removeItem(at: finalURL)
+            try? FileManager.default.moveItem(at: videoOnly, to: finalURL)
+            errorMessage = "音声を重ねられなかったため、映像のみ保存しました：\(error.localizedDescription)"
+        }
+        if let micResult { try? FileManager.default.removeItem(at: micResult.url) }
+        return FileManager.default.fileExists(atPath: finalURL.path) ? finalURL : nil
     }
 
     @objc private func tick(_ link: CADisplayLink) {
         guard let writer else { return }
-        // 音声と同じ時計（ホストクロック）で時刻を付ける
+        // マイクと同じ時計（ホストクロック）で時刻を付ける
         let time = CMClockGetTime(CMClockGetHostTimeClock())
-        let pixelBuffer = player?.currentPixelBuffer()
+        if wallOrigin == nil { wallOrigin = time.seconds }
+
+        let frame = player?.currentFrame()
+        if let frame, player?.hasVideo == true {
+            samples.append(PlaybackSample(wall: time.seconds, video: frame.itemTime, rate: frame.rate))
+        }
+        let pixelBuffer = frame?.buffer
         let orientation = player?.orientation ?? .up
 
         // 線が変わったときだけ画像を作り直す
         if let ink, ink.version != lastInkVersion {
             lastInkVersion = ink.version
-            if let image = rasterizer.full(for: ink, size: writer.size)?.cgImage {
+            if let image = rasterizer.image(for: ink, size: writer.size) {
                 inkImage = CIImage(cgImage: image)
             } else {
                 inkImage = nil
@@ -130,34 +170,25 @@ final class SessionRecorder: NSObject, ObservableObject {
             writer.appendFrame(video: pixelBuffer, orientation: orientation, ink: inkFrame, time: time)
         }
 
+        tickCount += 1
+        if tickCount % 3 == 0, let mic {
+            micLevel = mic.currentLevel
+        }
         let seconds = Int(CACurrentMediaTime() - startedAt)
         if seconds != elapsed { elapsed = seconds }
     }
 
-    // MARK: - 設定
+    // MARK: - オーディオ設定
 
-    private func makeCaptureSession(delegate: MovieWriter) -> AVCaptureSession {
-        let session = AVCaptureSession()
-        session.automaticallyConfiguresApplicationAudioSession = false
-        session.beginConfiguration()
-        if let mic = AVCaptureDevice.default(for: .audio),
-           let input = try? AVCaptureDeviceInput(device: mic),
-           session.canAddInput(input) {
-            session.addInput(input)
-        }
-        let output = AVCaptureAudioDataOutput()
-        output.setSampleBufferDelegate(delegate, queue: delegate.queue)
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-        }
-        session.commitConfiguration()
-        return session
-    }
-
+    /// AirPods などで聞きながら、声は iPad 本体のマイクで録る。
+    /// （AirPods のマイクを使うと通話モードになり、聞こえる音質が大きく下がるため）
     private func configureAudioSessionForRecording() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
         try session.setActive(true)
+        if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+            try? session.setPreferredInput(builtInMic)
+        }
     }
 
     private func restoreAudioSession() {

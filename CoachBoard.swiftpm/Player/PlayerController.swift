@@ -18,6 +18,8 @@ final class PlayerController: ObservableObject {
     @Published var errorMessage: String?
 
     var isScrubbing = false
+    /// 読み込んだ動画ファイル（録画停止時に動画の音を取り出すのに使う）
+    private(set) var sourceURL: URL?
     private(set) var orientation: CGImagePropertyOrientation = .up
 
     private var videoOutput: AVPlayerItemVideoOutput?
@@ -67,6 +69,7 @@ final class PlayerController: ObservableObject {
 
             videoOutput = output
             lastPixelBuffer = nil
+            sourceURL = url
             orientation = Self.orientation(for: transform)
             let rotated = naturalSize.applying(transform)
             let size = CGSize(width: abs(rotated.width), height: abs(rotated.height))
@@ -140,9 +143,10 @@ final class PlayerController: ObservableObject {
 
     // MARK: - 録画用
 
-    /// いま画面に出ているフレーム。停止中は最後のフレームをそのまま返す。
-    func currentPixelBuffer() -> CVPixelBuffer? {
-        guard hasVideo, let output = videoOutput else { return nil }
+    /// いま画面に出ているフレームと、その動画内の時刻・再生速度。
+    /// 停止中は最後のフレームをそのまま返す。
+    func currentFrame() -> (buffer: CVPixelBuffer?, itemTime: Double, rate: Float) {
+        guard hasVideo, let output = videoOutput else { return (nil, 0, 0) }
         let itemTime = output.itemTime(forHostTime: CACurrentMediaTime())
         if output.hasNewPixelBuffer(forItemTime: itemTime),
            let buffer = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
@@ -151,7 +155,8 @@ final class PlayerController: ObservableObject {
                   let buffer = output.copyPixelBuffer(forItemTime: player.currentTime(), itemTimeForDisplay: nil) {
             lastPixelBuffer = buffer
         }
-        return lastPixelBuffer
+        let seconds = itemTime.seconds.isFinite ? itemTime.seconds : player.currentTime().seconds
+        return (lastPixelBuffer, seconds, player.rate)
     }
 
     private static func orientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {

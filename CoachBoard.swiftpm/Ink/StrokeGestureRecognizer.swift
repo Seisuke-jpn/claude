@@ -1,14 +1,9 @@
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
 
-/// Apple Pencil の線を取りこぼさずに受け取るための専用ジェスチャー認識。
-///
-/// ビューの touchesBegan で受け取る方式だと、iPadOS のシステムジェスチャー
-/// （画面端のスワイプ判定など）がタッチの配信を少し遅らせることがあり、
-/// その間にペンが動いた分＝書き始めの部分が欠けてしまう。
-/// ジェスチャー認識はタッチを遅延なく最初に受け取れるので、Apple の描画アプリの
-/// サンプルと同じくこの方式にしている。さらに「まとめて届いた細かい入力
-/// （coalesced touches）」を書き始め・途中・書き終わりのすべてで拾う。
+/// 録画用に「描いている途中の線」の座標を追いかけるジェスチャー認識。
+/// 画面上の描画は PencilKit が行い、これは PencilKit の邪魔をせずに同時に動く。
+/// 途中の線は、ペンを離して PencilKit が線を確定した時点で確定線に置き換わる。
 final class StrokeGestureRecognizer: UIGestureRecognizer {
     /// 座標はすべて view の座標系
     var onBegin: ((CGPoint) -> Void)?

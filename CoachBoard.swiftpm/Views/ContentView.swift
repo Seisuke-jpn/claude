@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var showRecordings = false
     @State private var isLoadingVideo = false
     @State private var alertMessage: String?
+    @State private var showAudioSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,8 +68,8 @@ struct ContentView: View {
             RecordingsView(store: recordings)
         }
         .overlay {
-            if isLoadingVideo {
-                ProgressView("動画を読み込み中…")
+            if isLoadingVideo || recorder.isProcessing {
+                ProgressView(recorder.isProcessing ? "動画の音と声を重ねて書き出し中…" : "動画を読み込み中…")
                     .padding(24)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
@@ -99,6 +100,7 @@ struct ContentView: View {
                     Text("録画中 \(Self.clock(recorder.elapsed))")
                         .monospacedDigit()
                         .foregroundStyle(.red)
+                    MicLevelMeter(level: recorder.micLevel)
                 }
             }
 
@@ -113,6 +115,16 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .tint(recorder.isRecording ? .gray : .red)
             .disabled(recorder.isBusy)
+
+            Button {
+                showAudioSettings = true
+            } label: {
+                Label("音声", systemImage: "slider.horizontal.3")
+            }
+            .disabled(recorder.isRecording || recorder.isBusy)
+            .popover(isPresented: $showAudioSettings) {
+                AudioSettingsView()
+            }
 
             Button {
                 recordings.reload()
@@ -145,7 +157,8 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    InkCanvas(model: ink, allowFinger: ink.allowFinger)
+                    InkCanvas(model: ink, allowFinger: ink.allowFinger,
+                              colorIndex: ink.colorIndex, widthLevel: ink.widthLevel)
                 }
                 .frame(width: rect.width, height: rect.height)
             }

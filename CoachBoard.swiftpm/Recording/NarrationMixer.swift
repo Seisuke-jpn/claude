@@ -79,13 +79,22 @@ enum NarrationMixer {
         CMTime(seconds: seconds, preferredTimescale: 48_000)
     }
 
+    /// 書き出し結果（うまく音が入らなかったときの原因調査用）
+    struct Report {
+        var sourceAudioTracks = 0
+        var gameSeconds = 0.0
+        var micSeconds = 0.0
+    }
+
+    @discardableResult
     static func makeFinalMovie(videoOnly: URL,
                                source: URL?,
                                segments: [PlaybackSegment],
                                mic: MicRecorder.Result?,
                                wallOrigin: Double,
                                settings: NarrationMixSettings,
-                               output: URL) async throws {
+                               output: URL) async throws -> Report {
+        var report = Report()
         let videoAsset = AVURLAsset(url: videoOnly)
         let totalDuration = try await videoAsset.load(.duration)
         let total = totalDuration.seconds
@@ -96,39 +105,23 @@ enum NarrationMixer {
         let speech = mic.map { speechIntervals(levels: $0.levels, origin: wallOrigin, total: total) } ?? []
 
         // 1) 動画の音：再生していた区間だけを、録画上の同じ時刻に並べる（スロー再生は伸ばす）
+        //    ゲームの録画は「ゲーム音」「マイク」など音声トラックが複数あることが多いので、全トラックを使う
         if let source, !segments.isEmpty {
             let sourceAsset = AVURLAsset(url: source)
-            if let sourceTrack = try await sourceAsset.loadTracks(withMediaType: .audio).first,
-               let track = audioComposition.addMutableTrack(withMediaType: .audio,
-                                                            preferredTrackID: kCMPersistentTrackID_Invalid) {
-                let sourceDuration = try await sourceAsset.load(.duration).seconds
-                var cursor = 0.0
-                for segment in segments {
-                    let wallStart = max(segment.wallStart - wallOrigin, cursor)
-                    guard wallStart < total else { break }
-                    let wallEnd = min(segment.wallEnd - wallOrigin, total)
-                    let videoStart = max(0, segment.videoStart)
-                    let videoEnd = min(segment.videoEnd, sourceDuration)
-                    let wallLength = wallEnd - wallStart
-                    let videoLength = videoEnd - videoStart
-                    guard wallLength > 0.02, videoLength > 0.02 else { continue }
-
-                    if wallStart > cursor + 0.001 {
-                        track.insertEmptyTimeRange(CMTimeRange(start: t(cursor), duration: t(wallStart - cursor)))
-                    }
-                    try track.insertTimeRange(CMTimeRange(start: t(videoStart), duration: t(videoLength)),
-                                              of: sourceTrack, at: t(wallStart))
-                    if abs(videoLength - wallLength) > 0.001 {
-                        track.scaleTimeRange(CMTimeRange(start: t(wallStart), duration: t(videoLength)),
-                                             toDuration: t(wallLength))
-                    }
-                    cursor = wallStart + wallLength
-                }
-                if cursor > 0 {
+            let sourceTracks = try await sourceAsset.loadTracks(withMediaType: .audio)
+            let sourceDuration = try await sourceAsset.load(.duration).seconds
+            report.sourceAudioTracks = sourceTracks.count
+            for sourceTrack in sourceTracks {
+                guard let track = audioComposition.addMutableTrack(withMediaType: .audio,
+                                                                   preferredTrackID: kCMPersistentTrackID_Invalid) else { continue }
+                let placed = try place(segments, of: sourceTrack, into: track,
+                                       wallOrigin: wallOrigin, total: total, sourceDuration: sourceDuration)
+                if placed > 0 {
                     let parameters = AVMutableAudioMixInputParameters(track: track)
                     applyGameVolume(parameters, base: settings.gameVolume,
                                     speech: settings.ducking ? speech : [])
                     mixParameters.append(parameters)
+                    report.gameSeconds = max(report.gameSeconds, placed)
                 } else {
                     audioComposition.removeTrack(track)
                 }
@@ -155,6 +148,7 @@ enum NarrationMixer {
                     let parameters = AVMutableAudioMixInputParameters(track: track)
                     parameters.setVolume(settings.micVolume, at: .zero)
                     mixParameters.append(parameters)
+                    report.micSeconds = length
                 } else {
                     audioComposition.removeTrack(track)
                 }
@@ -165,7 +159,7 @@ enum NarrationMixer {
         guard !mixParameters.isEmpty else {
             try? FileManager.default.removeItem(at: output)
             try FileManager.default.moveItem(at: videoOnly, to: output)
-            return
+            return report
         }
 
         // 3) 2つの音を混ぜて m4a に書き出す
@@ -211,6 +205,39 @@ enum NarrationMixer {
         finalExport.outputFileType = .mp4
         try await run(finalExport)
         try? FileManager.default.removeItem(at: videoOnly)
+        return report
+    }
+
+    /// 再生区間を1本の音声トラックに並べる。並べた合計秒数を返す。
+    private static func place(_ segments: [PlaybackSegment],
+                              of sourceTrack: AVAssetTrack,
+                              into track: AVMutableCompositionTrack,
+                              wallOrigin: Double, total: Double, sourceDuration: Double) throws -> Double {
+        var cursor = 0.0
+        var placed = 0.0
+        for segment in segments {
+            let wallStart = max(segment.wallStart - wallOrigin, cursor)
+            guard wallStart < total else { break }
+            let wallEnd = min(segment.wallEnd - wallOrigin, total)
+            let videoStart = max(0, segment.videoStart)
+            let videoEnd = min(segment.videoEnd, sourceDuration)
+            let wallLength = wallEnd - wallStart
+            let videoLength = videoEnd - videoStart
+            guard wallLength > 0.02, videoLength > 0.02 else { continue }
+
+            if wallStart > cursor + 0.001 {
+                track.insertEmptyTimeRange(CMTimeRange(start: t(cursor), duration: t(wallStart - cursor)))
+            }
+            try track.insertTimeRange(CMTimeRange(start: t(videoStart), duration: t(videoLength)),
+                                      of: sourceTrack, at: t(wallStart))
+            if abs(videoLength - wallLength) > 0.001 {
+                track.scaleTimeRange(CMTimeRange(start: t(wallStart), duration: t(videoLength)),
+                                     toDuration: t(wallLength))
+            }
+            cursor = wallStart + wallLength
+            placed += wallLength
+        }
+        return placed
     }
 
     private static func run(_ session: AVAssetExportSession) async throws {
@@ -248,20 +275,36 @@ enum NarrationMixer {
 
     private static func applyGameVolume(_ parameters: AVMutableAudioMixInputParameters,
                                         base: Float, speech: [(Double, Double)]) {
-        parameters.setVolume(base, at: .zero)
         let ducked = base * 0.4
         let fadeDown = 0.15
         let fadeUp = 0.4
+        // 音量の変化は時間順で重ならないようにする（重なると AVFoundation が設定を無視することがある）
         var previousEnd = 0.0
+        var started = false
         for (start, end) in speech {
-            let downStart = max(previousEnd, start - fadeDown)
-            let downLength = max(0.01, start - downStart)
-            parameters.setVolumeRamp(fromStartVolume: base, toEndVolume: ducked,
-                                     timeRange: CMTimeRange(start: t(downStart), duration: t(downLength)))
-            let upStart = max(end, downStart + downLength)
+            let downStart = max(started ? previousEnd + 0.01 : 0, start - fadeDown)
+            let downEnd = max(start, downStart + 0.01)
+            if !started {
+                started = true
+                if downStart < 0.05 {
+                    // 録画の最初から話していた
+                    parameters.setVolume(ducked, at: .zero)
+                } else {
+                    parameters.setVolume(base, at: .zero)
+                    parameters.setVolumeRamp(fromStartVolume: base, toEndVolume: ducked,
+                                             timeRange: CMTimeRange(start: t(downStart), duration: t(downEnd - downStart)))
+                }
+            } else {
+                parameters.setVolumeRamp(fromStartVolume: base, toEndVolume: ducked,
+                                         timeRange: CMTimeRange(start: t(downStart), duration: t(downEnd - downStart)))
+            }
+            let upStart = max(end, downEnd + 0.01)
             parameters.setVolumeRamp(fromStartVolume: ducked, toEndVolume: base,
                                      timeRange: CMTimeRange(start: t(upStart), duration: t(fadeUp)))
             previousEnd = upStart + fadeUp
+        }
+        if !started {
+            parameters.setVolume(base, at: .zero)
         }
     }
 }

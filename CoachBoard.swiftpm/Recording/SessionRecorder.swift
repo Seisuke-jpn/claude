@@ -123,15 +123,24 @@ final class SessionRecorder: NSObject, ObservableObject {
         isProcessing = true
         defer { isProcessing = false }
         let segments = PlaybackTimeline.segments(from: samples)
+        let sampleCount = samples.count
+        let playingCount = samples.filter { $0.rate > 0 }.count
         samples = []
         do {
-            try await NarrationMixer.makeFinalMovie(videoOnly: videoOnly,
+            let report = try await NarrationMixer.makeFinalMovie(videoOnly: videoOnly,
                                                     source: sourceURL,
                                                     segments: segments,
                                                     mic: micResult,
                                                     wallOrigin: wallOrigin ?? 0,
                                                     settings: NarrationMixSettings.current,
                                                     output: finalURL)
+            if sourceURL != nil, report.gameSeconds < 0.1 {
+                // 原因を特定するための情報を出す
+                errorMessage = """
+                動画の音を録画に重ねられませんでした。お手数ですが、この画面のスクリーンショットを送ってください。
+                記録 \(sampleCount) 件（うち再生中 \(playingCount) 件）／再生区間 \(segments.count) 個／元動画の音声トラック \(report.sourceAudioTracks) 本／声 \(Int(report.micSeconds)) 秒
+                """
+            }
         } catch {
             // 音の合成に失敗しても映像だけは残す
             try? FileManager.default.removeItem(at: finalURL)

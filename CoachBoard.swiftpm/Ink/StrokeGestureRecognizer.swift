@@ -9,6 +9,8 @@ final class StrokeGestureRecognizer: UIGestureRecognizer {
     var onBegin: ((CGPoint) -> Void)?
     var onAppend: ((CGPoint) -> Void)?
     var onEnd: (() -> Void)?
+    /// ペンが画面に触れてから、アプリに届くまでの遅れ（ミリ秒）。原因調査用。
+    var onTouchDelay: ((Int) -> Void)?
 
     var allowFinger = false {
         didSet { updateAllowedTouchTypes() }
@@ -45,6 +47,8 @@ final class StrokeGestureRecognizer: UIGestureRecognizer {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         if trackedTouch == nil, let touch = touches.first {
             trackedTouch = touch
+            let delay = ProcessInfo.processInfo.systemUptime - touch.timestamp
+            onTouchDelay?(max(0, Int(delay * 1000)))
             let points = samples(of: touch, in: event).map(location(of:))
             onBegin?(points.first ?? location(of: touch))
             for point in points.dropFirst() { onAppend?(point) }

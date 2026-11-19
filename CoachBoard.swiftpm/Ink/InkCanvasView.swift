@@ -4,7 +4,7 @@ import PencilKit
 
 /// 画面上の手描き。描画そのものは PencilKit（メモアプリと同じエンジン）に任せる。
 /// 書き始め・書き終わりの補正や Pencil の遅延対策は PencilKit 側で行われる。
-final class InkBoardView: UIView, PKCanvasViewDelegate, UIGestureRecognizerDelegate {
+final class InkBoardView: UIView, PKCanvasViewDelegate, UIGestureRecognizerDelegate, UIScribbleInteractionDelegate {
     private let model: InkModel
     private let canvas = PKCanvasView()
     /// 録画用に「描いている途中の線」を追いかけるだけの認識（描画はしない）
@@ -36,7 +36,14 @@ final class InkBoardView: UIView, PKCanvasViewDelegate, UIGestureRecognizerDeleg
         liveRecognizer.onBegin = { [weak self] point in self?.model.liveBegin(at: point) }
         liveRecognizer.onAppend = { [weak self] point in self?.model.liveAppend(point) }
         liveRecognizer.onEnd = { [weak self] in self?.model.liveEnd() }
+        liveRecognizer.onTouchDelay = { [weak self] ms in self?.model.lastTouchDelayMs = ms }
         canvas.addGestureRecognizer(liveRecognizer)
+
+        // 描画面では「スクリブル（手書き文字入力）」を起動させない。
+        // スクリブルが手書きかどうか判定している間、書き始めのペン入力が保留されることがあるため。
+        let scribble = UIScribbleInteraction(delegate: self)
+        addInteraction(scribble)
+        canvas.addInteraction(UIScribbleInteraction(delegate: self))
 
         model.applyDrawing = { [weak self] drawing in
             guard let self else { return }
@@ -66,6 +73,10 @@ final class InkBoardView: UIView, PKCanvasViewDelegate, UIGestureRecognizerDeleg
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         guard !isApplying else { return }
         model.canvasDidChange(canvasView.drawing)
+    }
+
+    func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool {
+        false
     }
 
     // PencilKit の描画と同時に、録画用の追跡も動かす

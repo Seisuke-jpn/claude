@@ -32,6 +32,8 @@ final class InkModel: ObservableObject {
     @Published var clearOnPlay = true
     @Published private(set) var canUndo = false
     @Published private(set) var isEmpty = true
+    /// 直近の書き始めで、ペンが触れてからアプリに届くまでにかかった時間（ミリ秒）
+    @Published var lastTouchDelayMs: Int?
 
     /// 確定済みの線（canvasSize の座標系）
     private(set) var drawing = PKDrawing()

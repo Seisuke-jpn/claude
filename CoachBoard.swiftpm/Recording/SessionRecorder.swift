@@ -17,6 +17,10 @@ final class SessionRecorder: NSObject, ObservableObject {
     @Published private(set) var elapsed: Int = 0
     /// マイクの音量（0〜1）。録画中のメーター用。
     @Published private(set) var micLevel: Float = 0
+    /// 録画中に実際に使っているマイクの名前
+    @Published private(set) var inputName: String?
+    /// iPad の音声処理（雑音抑制）が有効か。有効ならコントロールセンターの「マイクモード」も使える。
+    @Published private(set) var voiceProcessingActive = false
     @Published var errorMessage: String?
 
     private var writer: MovieWriter?
@@ -57,10 +61,13 @@ final class SessionRecorder: NSObject, ObservableObject {
 
         if micGranted {
             do {
-                try configureAudioSessionForRecording()
+                let routeWarning = try configureAudioSessionForRecording()
                 let recorder = MicRecorder(url: temp.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf"))
-                try recorder.start()
+                try recorder.start(noiseReduction: MicSettings.noiseReduction)
                 mic = recorder
+                voiceProcessingActive = recorder.voiceProcessingActive
+                inputName = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName
+                if let routeWarning { errorMessage = routeWarning }
             } catch {
                 errorMessage = "マイクを開始できなかったため、声なしで録画します：\(error.localizedDescription)"
             }
@@ -103,6 +110,8 @@ final class SessionRecorder: NSObject, ObservableObject {
         let micResult = mic?.stop()
         mic = nil
         micLevel = 0
+        inputName = nil
+        voiceProcessingActive = false
 
         let videoResult = await writer.finish()
         self.writer = nil
@@ -189,15 +198,43 @@ final class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - オーディオ設定
 
-    /// AirPods などで聞きながら、声は iPad 本体のマイクで録る。
-    /// （AirPods のマイクを使うと通話モードになり、聞こえる音質が大きく下がるため）
-    private func configureAudioSessionForRecording() throws {
+    /// 音声設定で選んだマイクで録音できるようにする。
+    /// 標準は iPad 本体のマイク（AirPods などは聞く専用：AirPods のマイクを使うと通話モードになり音質が下がるため）。
+    /// 選んだマイクがつながっていなければ本体のマイクに戻し、その旨のメッセージを返す。
+    private func configureAudioSessionForRecording() throws -> String? {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
-        try session.setActive(true)
-        if let builtInMic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
-            try? session.setPreferredInput(builtInMic)
+        let selection = MicSettings.selectedInput
+        var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+        if selection == MicSettings.bluetoothID {
+            options.insert(.allowBluetooth)
         }
+        try session.setCategory(.playAndRecord, mode: .default, options: options)
+        try session.setActive(true)
+
+        let inputs = session.availableInputs ?? []
+        let builtIn = inputs.first { $0.portType == .builtInMic }
+        var preferred: AVAudioSessionPortDescription?
+        var warning: String?
+        switch selection {
+        case MicSettings.builtInID:
+            preferred = builtIn
+        case MicSettings.bluetoothID:
+            preferred = inputs.first { $0.portType == .bluetoothHFP }
+            if preferred == nil {
+                preferred = builtIn
+                warning = "Bluetooth のマイクが見つからないため、iPad 本体のマイクで録音します。"
+            }
+        default:
+            preferred = inputs.first { $0.uid == selection }
+            if preferred == nil {
+                preferred = builtIn
+                warning = "選んだマイクがつながっていないため、iPad 本体のマイクで録音します。"
+            }
+        }
+        if let preferred {
+            try? session.setPreferredInput(preferred)
+        }
+        return warning
     }
 
     private func restoreAudioSession() {

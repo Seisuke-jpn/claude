@@ -101,6 +101,22 @@ struct ContentView: View {
                         .monospacedDigit()
                         .foregroundStyle(.red)
                     MicLevelMeter(level: recorder.micLevel)
+                    if let name = recorder.inputName {
+                        Text(name)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if recorder.voiceProcessingActive {
+                        // iPad の「声を分離」などを選ぶシステム画面を開く
+                        Button {
+                            AVCaptureDevice.showSystemUserInterface(.microphoneModes)
+                        } label: {
+                            Label("マイクモード", systemImage: "waveform.and.mic")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
             }
 

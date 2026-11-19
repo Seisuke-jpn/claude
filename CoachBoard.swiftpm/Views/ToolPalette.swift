@@ -47,16 +47,6 @@ struct ToolPalette: View {
                 PaletteToggle(title: "指で描く", systemImage: "hand.draw", isOn: $ink.allowFinger)
                 PaletteToggle(title: "再生で消す", systemImage: "play.circle", isOn: $ink.clearOnPlay)
 
-                if let delay = ink.lastTouchDelayMs {
-                    VStack(spacing: 2) {
-                        Text("入力の遅れ")
-                        Text("\(delay)ms")
-                            .monospacedDigit()
-                            .foregroundStyle(delay > 30 ? Color.orange : Color.green)
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                }
             }
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity)

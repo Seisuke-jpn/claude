@@ -57,13 +57,16 @@ struct NarrationMixSettings {
     var gameVolume: Float
     var micVolume: Float
     var ducking: Bool
+    /// 話していない間はマイクを下げる（周りの雑音を目立たなくする）
+    var micGate: Bool
 
     static var current: NarrationMixSettings {
         let d = UserDefaults.standard
         return NarrationMixSettings(
             gameVolume: Float(d.object(forKey: Keys.gameVolume) as? Double ?? 0.8),
             micVolume: Float(d.object(forKey: Keys.micVolume) as? Double ?? 1.0),
-            ducking: d.object(forKey: Keys.ducking) as? Bool ?? true
+            ducking: d.object(forKey: Keys.ducking) as? Bool ?? true,
+            micGate: MicSettings.gate
         )
     }
 }
@@ -118,8 +121,9 @@ enum NarrationMixer {
                                        wallOrigin: wallOrigin, total: total, sourceDuration: sourceDuration)
                 if placed > 0 {
                     let parameters = AVMutableAudioMixInputParameters(track: track)
-                    applyGameVolume(parameters, base: settings.gameVolume,
-                                    speech: settings.ducking ? speech : [])
+                    applyEnvelope(parameters, outside: settings.gameVolume,
+                                  inside: settings.gameVolume * 0.4,
+                                  speech: settings.ducking ? speech : [])
                     mixParameters.append(parameters)
                     report.gameSeconds = max(report.gameSeconds, placed)
                 } else {
@@ -146,7 +150,12 @@ enum NarrationMixer {
                     try track.insertTimeRange(CMTimeRange(start: t(sourceStart), duration: t(length)),
                                               of: micTrack, at: t(at))
                     let parameters = AVMutableAudioMixInputParameters(track: track)
-                    parameters.setVolume(settings.micVolume, at: .zero)
+                    if settings.micGate, !speech.isEmpty {
+                        applyEnvelope(parameters, outside: settings.micVolume * 0.15,
+                                      inside: settings.micVolume, speech: speech)
+                    } else {
+                        parameters.setVolume(settings.micVolume, at: .zero)
+                    }
                     mixParameters.append(parameters)
                     report.micSeconds = length
                 } else {
@@ -255,7 +264,10 @@ enum NarrationMixer {
 
     /// マイクの音量から「話している区間」（録画上の秒）を求める
     static func speechIntervals(levels: [MicRecorder.LevelSample], origin: Double, total: Double) -> [(Double, Double)] {
-        let threshold: Float = -42   // これより大きい音を「話している」とみなす
+        // 周りの雑音の大きさ（静かな時間の音量）を求め、それより十分大きい音を「話している」とみなす
+        let sorted = levels.map(\.db).sorted()
+        let noiseFloor = sorted.isEmpty ? -60 : sorted[Int(Double(sorted.count - 1) * 0.2)]
+        let threshold = min(-30, max(-55, noiseFloor + 12))
         let mergeGap = 1.0           // 1秒未満の間は話し続けているとみなす
         let hold = 0.3               // 話し終わってから少し待ってから戻す
         var intervals: [(Double, Double)] = []
@@ -273,38 +285,40 @@ enum NarrationMixer {
             .filter { $0.1 > $0.0 }
     }
 
-    private static func applyGameVolume(_ parameters: AVMutableAudioMixInputParameters,
-                                        base: Float, speech: [(Double, Double)]) {
-        let ducked = base * 0.4
-        let fadeDown = 0.15
-        let fadeUp = 0.4
+    /// 話している区間（speech）は inside、それ以外は outside の音量にする。
+    /// ゲーム音なら「話している間だけ下げる」、マイクなら「話していない間だけ下げる」になる。
+    /// 区間の少し前から変化させるので、声の出だしは切れない。
+    private static func applyEnvelope(_ parameters: AVMutableAudioMixInputParameters,
+                                      outside: Float, inside: Float, speech: [(Double, Double)]) {
+        let fadeIn = 0.15
+        let fadeOut = 0.4
         // 音量の変化は時間順で重ならないようにする（重なると AVFoundation が設定を無視することがある）
         var previousEnd = 0.0
         var started = false
         for (start, end) in speech {
-            let downStart = max(started ? previousEnd + 0.01 : 0, start - fadeDown)
-            let downEnd = max(start, downStart + 0.01)
+            let rampStart = max(started ? previousEnd + 0.01 : 0, start - fadeIn)
+            let rampEnd = max(start, rampStart + 0.01)
             if !started {
                 started = true
-                if downStart < 0.05 {
+                if rampStart < 0.05 {
                     // 録画の最初から話していた
-                    parameters.setVolume(ducked, at: .zero)
+                    parameters.setVolume(inside, at: .zero)
                 } else {
-                    parameters.setVolume(base, at: .zero)
-                    parameters.setVolumeRamp(fromStartVolume: base, toEndVolume: ducked,
-                                             timeRange: CMTimeRange(start: t(downStart), duration: t(downEnd - downStart)))
+                    parameters.setVolume(outside, at: .zero)
+                    parameters.setVolumeRamp(fromStartVolume: outside, toEndVolume: inside,
+                                             timeRange: CMTimeRange(start: t(rampStart), duration: t(rampEnd - rampStart)))
                 }
             } else {
-                parameters.setVolumeRamp(fromStartVolume: base, toEndVolume: ducked,
-                                         timeRange: CMTimeRange(start: t(downStart), duration: t(downEnd - downStart)))
+                parameters.setVolumeRamp(fromStartVolume: outside, toEndVolume: inside,
+                                         timeRange: CMTimeRange(start: t(rampStart), duration: t(rampEnd - rampStart)))
             }
-            let upStart = max(end, downEnd + 0.01)
-            parameters.setVolumeRamp(fromStartVolume: ducked, toEndVolume: base,
-                                     timeRange: CMTimeRange(start: t(upStart), duration: t(fadeUp)))
-            previousEnd = upStart + fadeUp
+            let backStart = max(end, rampEnd + 0.01)
+            parameters.setVolumeRamp(fromStartVolume: inside, toEndVolume: outside,
+                                     timeRange: CMTimeRange(start: t(backStart), duration: t(fadeOut)))
+            previousEnd = backStart + fadeOut
         }
         if !started {
-            parameters.setVolume(base, at: .zero)
+            parameters.setVolume(outside, at: .zero)
         }
     }
 }

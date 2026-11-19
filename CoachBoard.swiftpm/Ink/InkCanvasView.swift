@@ -2,11 +2,15 @@ import SwiftUI
 import UIKit
 
 /// Apple Pencil の入力を受け取って線を描くビュー
-final class InkCanvasView: UIView {
+final class InkCanvasView: UIView, UIGestureRecognizerDelegate {
     private let model: InkModel
     private let rasterizer = InkRasterizer()
-    private weak var activeTouch: UITouch?
-    var allowFinger = false
+    private let strokeRecognizer = StrokeGestureRecognizer(target: nil, action: nil)
+
+    var allowFinger: Bool {
+        get { strokeRecognizer.allowFinger }
+        set { strokeRecognizer.allowFinger = newValue }
+    }
 
     init(model: InkModel) {
         self.model = model
@@ -16,6 +20,20 @@ final class InkCanvasView: UIView {
         contentMode = .redraw
         isMultipleTouchEnabled = true
         model.onChange = { [weak self] in self?.setNeedsDisplay() }
+
+        strokeRecognizer.delegate = self
+        strokeRecognizer.onBegin = { [weak self] point in
+            guard let self else { return }
+            self.model.begin(at: self.normalized(point))
+        }
+        strokeRecognizer.onAppend = { [weak self] point in
+            guard let self else { return }
+            self.model.append(self.normalized(point))
+        }
+        strokeRecognizer.onEnd = { [weak self] in
+            self?.model.end()
+        }
+        addGestureRecognizer(strokeRecognizer)
     }
 
     required init?(coder: NSCoder) {
@@ -27,36 +45,10 @@ final class InkCanvasView: UIView {
         return CGPoint(x: p.x / bounds.width, y: p.y / bounds.height)
     }
 
-    private func canDraw(with touch: UITouch) -> Bool {
-        touch.type == .pencil || (allowFinger && touch.type == .direct)
-    }
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard activeTouch == nil, let touch = touches.first(where: { canDraw(with: $0) }) else { return }
-        activeTouch = touch
-        model.begin(at: normalized(touch.location(in: self)))
-    }
-
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = activeTouch, touches.contains(touch) else { return }
-        // Pencil は画面の更新より細かく入力が来るので、まとめて取り出す
-        let samples = event?.coalescedTouches(for: touch) ?? [touch]
-        for sample in samples {
-            model.append(normalized(sample.location(in: self)))
-        }
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = activeTouch, touches.contains(touch) else { return }
-        model.append(normalized(touch.location(in: self)))
-        model.end()
-        activeTouch = nil
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = activeTouch, touches.contains(touch) else { return }
-        model.end()
-        activeTouch = nil
+    // 他のジェスチャーに線の入力を横取りされないようにする
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
     }
 
     override func draw(_ rect: CGRect) {

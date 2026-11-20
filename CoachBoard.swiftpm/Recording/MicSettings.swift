@@ -22,6 +22,13 @@ enum MicSettings {
         UserDefaults.standard.object(forKey: Keys.noiseReduction) as? Bool ?? true
     }
 
+    /// 実際にノイズ除去を使うか。
+    /// Bluetooth マイク（AirPods など）はイヤホン側で雑音処理をしているうえ、
+    /// iPad の音声処理を重ねると音が途切れやすいので使わない。
+    static var effectiveNoiseReduction: Bool {
+        noiseReduction && selectedInput != bluetoothID
+    }
+
     /// 話していない間はマイクの音を下げる（書き出し時）
     static var gate: Bool {
         UserDefaults.standard.object(forKey: Keys.gate) as? Bool ?? true
@@ -30,12 +37,16 @@ enum MicSettings {
     /// 音声設定で選んだマイクで録音できるようにする。
     /// 標準は iPad 本体のマイク（AirPods などは聞く専用：AirPods のマイクを使うと通話モードになり音質が下がるため）。
     /// 選んだマイクがつながっていなければ本体のマイクに戻し、その旨のメッセージを返す。
-    static func configureSessionForRecording() throws -> String? {
+    static func configureSessionForRecording() async throws -> String? {
         let session = AVAudioSession.sharedInstance()
         let selection = MicSettings.selectedInput
-        var options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+        let options: AVAudioSession.CategoryOptions
         if selection == MicSettings.bluetoothID {
-            options.insert(.allowBluetooth)
+            // Bluetooth のマイクは「通話モード（HFP）」でしか使えない。
+            // 高音質モード（A2DP）を許可すると出力が A2DP のまま残り、マイクが有効にならないので外す。
+            options = [.allowBluetooth, .defaultToSpeaker]
+        } else {
+            options = [.defaultToSpeaker, .allowBluetoothA2DP]
         }
         try session.setCategory(.playAndRecord, mode: .default, options: options)
         try session.setActive(true)
@@ -62,6 +73,12 @@ enum MicSettings {
         }
         if let preferred {
             try? session.setPreferredInput(preferred)
+            // 経路の切り替えが終わるのを待ってから録音を始める（途中で始めると何度も作り直しになり音が途切れる）
+            for _ in 0..<20 {
+                if session.currentRoute.inputs.contains(where: { $0.uid == preferred.uid }) { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try? await Task.sleep(nanoseconds: preferred.portType == .bluetoothHFP ? 400_000_000 : 100_000_000)
         }
         return warning
     }

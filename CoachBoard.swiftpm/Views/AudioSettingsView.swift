@@ -86,6 +86,15 @@ struct AudioSettingsView: View {
                             .font(.caption)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    if !tester.isTesting, tester.canPlayBack {
+                        Button {
+                            tester.playBack()
+                        } label: {
+                            Label(tester.isPlayingBack ? "再生中…" : "テスト録音を聞く", systemImage: "play.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(tester.isPlayingBack)
+                    }
                     if tester.isTesting, let name = tester.inputName {
                         Text("使用中のマイク：\(name)")
                             .font(.caption)
@@ -96,7 +105,7 @@ struct AudioSettingsView: View {
                 Toggle(isOn: $noiseReduction) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("ノイズ除去")
-                        Text("周りの雑音を抑えます。録画中に出る「マイクモード」ボタンから「声を分離」を選ぶと、さらに強力になります。外部マイクで原音のまま録りたいときはオフ。")
+                        Text("周りの雑音を抑えます。録画中に出る「マイクモード」ボタンから「声を分離」を選ぶと、さらに強力になります。外部マイクで原音のまま録りたいときはオフ。Bluetooth マイクではイヤホン側の雑音処理を使うため、この設定は使いません。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -147,7 +156,10 @@ struct AudioSettingsView: View {
         }
         .frame(width: 380, height: 560)
         .onAppear { catalog.refresh() }
-        .onDisappear { tester.stop() }
+        .onDisappear {
+            tester.stop()
+            tester.discardRecording()
+        }
         .onChange(of: micInput) { _, _ in tester.restartIfTesting() }
         .onChange(of: noiseReduction) { _, _ in tester.restartIfTesting() }
         .onReceive(routeChanges) { _ in catalog.refresh() }

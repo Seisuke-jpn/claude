@@ -61,9 +61,9 @@ final class SessionRecorder: NSObject, ObservableObject {
 
         if micGranted {
             do {
-                let routeWarning = try MicSettings.configureSessionForRecording()
+                let routeWarning = try await MicSettings.configureSessionForRecording()
                 let recorder = MicRecorder(directory: temp.appendingPathComponent("Mic-\(UUID().uuidString)", isDirectory: true))
-                try recorder.start(noiseReduction: MicSettings.noiseReduction)
+                try recorder.start(noiseReduction: MicSettings.effectiveNoiseReduction)
                 mic = recorder
                 voiceProcessingActive = recorder.voiceProcessingActive
                 inputName = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName

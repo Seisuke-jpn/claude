@@ -46,6 +46,7 @@ final class MicRecorder: @unchecked Sendable {
     // queue 上でのみ触る
     private var running = false
     private var wantsVoiceProcessing = false
+    private var pendingRestart: DispatchWorkItem?
 
     // lock で守る（録音スレッドからも触る）
     private let lock = NSLock()
@@ -59,6 +60,7 @@ final class MicRecorder: @unchecked Sendable {
     private var peakDB: Float = -160
     private var _voiceProcessingActive = false
     private var _fellBack = false
+    private var _restartCount = 0
     private var hpPrevInput: [Float] = []
     private var hpPrevOutput: [Float] = []
     private var hpAlpha: Float = 1
@@ -85,6 +87,12 @@ final class MicRecorder: @unchecked Sendable {
         return _voiceProcessingActive
     }
 
+    /// 音声経路の変化で録音を作り直した回数（多いと音が途切れる原因になる）
+    var restartCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _restartCount
+    }
+
     /// ノイズ除去で音が来なかったため、ノイズ除去なしに切り替えた
     var fellBackFromVoiceProcessing: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -99,7 +107,7 @@ final class MicRecorder: @unchecked Sendable {
         }
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange,
                                                           object: engine, queue: nil) { [weak self] _ in
-            self?.queue.async { self?.handleConfigurationChange() }
+            self?.queue.async { self?.scheduleRestart() }
         }
         scheduleWatchdog()
     }
@@ -111,6 +119,8 @@ final class MicRecorder: @unchecked Sendable {
         }
         return queue.sync {
             running = false
+            pendingRestart?.cancel()
+            pendingRestart = nil
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
             if engine.inputNode.isVoiceProcessingEnabled {
@@ -182,8 +192,21 @@ final class MicRecorder: @unchecked Sendable {
         running = true
     }
 
+    /// 経路の変化は短い間に何度も続くことがあるので、落ち着くまで待ってから1回だけ作り直す
+    private func scheduleRestart() {
+        guard running else { return }
+        pendingRestart?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.handleConfigurationChange() }
+        pendingRestart = work
+        queue.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
     private func handleConfigurationChange() {
         guard running else { return }
+        pendingRestart = nil
+        lock.lock()
+        _restartCount += 1
+        lock.unlock()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         do {

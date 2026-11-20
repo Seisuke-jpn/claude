@@ -61,6 +61,7 @@ final class MicRecorder: @unchecked Sendable {
     private var _voiceProcessingActive = false
     private var _fellBack = false
     private var _restartCount = 0
+    private var _switchedOn = false
     private var hpPrevInput: [Float] = []
     private var hpPrevOutput: [Float] = []
     private var hpAlpha: Float = 1
@@ -91,6 +92,12 @@ final class MicRecorder: @unchecked Sendable {
     var restartCount: Int {
         lock.lock(); defer { lock.unlock() }
         return _restartCount
+    }
+
+    /// 音声処理なしでは音が来なかったため、音声処理ありに切り替えた
+    var switchedOnVoiceProcessing: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _switchedOn
     }
 
     /// ノイズ除去で音が来なかったため、ノイズ除去なしに切り替えた
@@ -219,12 +226,15 @@ final class MicRecorder: @unchecked Sendable {
     private func scheduleWatchdog() {
         queue.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.running else { return }
-            guard !self.isReceivingAudio, self.engine.inputNode.isVoiceProcessingEnabled else { return }
-            // ノイズ除去を使うと音が来なかった → ノイズ除去なしでやり直す
+            guard !self.isReceivingAudio else { return }
+            // 音が来ない → 音声処理（ノイズ除去）の有無を切り替えて1回だけやり直す。
+            // 機種やマイクによって「音声処理ありでしか音が来ない」「なしでしか来ない」場合があるため。
+            let wasOn = self.engine.inputNode.isVoiceProcessingEnabled
             self.lock.lock()
-            self._fellBack = true
+            self._fellBack = wasOn
+            self._switchedOn = !wasOn
             self.lock.unlock()
-            self.wantsVoiceProcessing = false
+            self.wantsVoiceProcessing = !wasOn
             self.engine.inputNode.removeTap(onBus: 0)
             self.engine.stop()
             do {

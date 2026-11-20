@@ -117,8 +117,10 @@ final class MicTester: ObservableObject {
         if mic.isReceivingAudio {
             if !restartNote.isEmpty {
                 status = "音が届いています" + restartNote
+            } else if mic.switchedOnVoiceProcessing {
+                status = "音が届いています（このマイクはノイズ除去なしでは音が届かなかったため、ノイズ除去オン）"
             } else if MicSettings.selectedInput == MicSettings.bluetoothID {
-                status = "音が届いています（Bluetooth マイクはイヤホン側の雑音処理を使います）"
+                status = "音が届いています（Bluetooth マイクは常にノイズ除去オン）"
             } else if mic.voiceProcessingActive {
                 status = "音が届いています（ノイズ除去オン）"
             } else if mic.fellBackFromVoiceProcessing {

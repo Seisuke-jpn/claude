@@ -105,7 +105,7 @@ struct AudioSettingsView: View {
                 Toggle(isOn: $noiseReduction) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("ノイズ除去")
-                        Text("周りの雑音を抑えます。録画中に出る「マイクモード」ボタンから「声を分離」を選ぶと、さらに強力になります。外部マイクで原音のまま録りたいときはオフ。Bluetooth マイクではイヤホン側の雑音処理を使うため、この設定は使いません。")
+                        Text("周りの雑音を抑えます。録画中に出る「マイクモード」ボタンから「声を分離」を選ぶと、さらに強力になります。外部マイクで原音のまま録りたいときはオフ。Bluetooth マイクは、この設定に関わらず常にオンになります（オフだと音が届かないため）。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

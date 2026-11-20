@@ -22,11 +22,10 @@ enum MicSettings {
         UserDefaults.standard.object(forKey: Keys.noiseReduction) as? Bool ?? true
     }
 
-    /// 実際にノイズ除去を使うか。
-    /// Bluetooth マイク（AirPods など）はイヤホン側で雑音処理をしているうえ、
-    /// iPad の音声処理を重ねると音が途切れやすいので使わない。
+    /// 実際に iPad の音声処理（ノイズ除去）を使うか。
+    /// Bluetooth マイク（通話モード）は音声処理を使わないと音が届かないため、常に使う。
     static var effectiveNoiseReduction: Bool {
-        noiseReduction && selectedInput != bluetoothID
+        selectedInput == bluetoothID ? true : noiseReduction
     }
 
     /// 話していない間はマイクの音を下げる（書き出し時）
